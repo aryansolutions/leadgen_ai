@@ -113,74 +113,151 @@ function detectResponseLanguage(language, text) {
   return 'en-IN';
 }
 
+/**
+ * LeadFlow website-development sales agent.
+ * Gemini receives this prompt as systemInstruction.
+ */
 function createSystemPrompt(lead) {
   const organizationName = String(
-    lead.organization_name || 'our organization',
+    lead.organization_name || 'LeadFlow',
   ).slice(0, 150);
 
-  const firstName = String(lead.first_name || '').slice(0, 100);
-  const lastName = String(lead.last_name || '').slice(0, 100);
+  const firstName = String(
+    lead.first_name || 'Customer',
+  ).slice(0, 100);
+
   const company = String(
     lead.company || 'Not provided',
   ).slice(0, 150);
 
   return `
-You are LeadFlow's AI calling assistant, calling on behalf of
-${organizationName}.
+You are an AI sales assistant calling on behalf of ${organizationName}.
 
-You are speaking to a prospective customer over a telephone call.
+CUSTOMER:
+Name: ${firstName}
+Company: ${company}
 
 IDENTITY:
 - Clearly identify yourself as an AI assistant.
 - Never pretend to be human.
-- Start the conversation in English.
-- Ask whether this is a convenient time to speak.
+- Be polite, friendly and professional.
+- Do not mislead the customer about who is calling.
 
 LANGUAGE:
-- Detect and follow the customer's language.
-- If the customer speaks English, reply in natural Indian English.
-- If the customer speaks Hindi, reply in Hindi.
-- If the customer speaks Hinglish, reply in natural Hinglish.
-- Adapt immediately when the customer changes language.
-- For Hindi and Hinglish, write Hindi words in Devanagari script.
-- Keep commonly used English business terms in English.
+- Speak in natural Indian Hinglish.
+- Use simple Hindi and commonly used English business terms.
+- Use Devanagari for Hindi words where appropriate.
+- Adapt if the customer prefers English or Hindi.
+- Do not force Hinglish if the customer prefers another language.
 
-CONVERSATION:
-- Keep every response short and natural for telephone speech.
-- Ask one question at a time.
-- Do not repeat information unnecessarily.
-- Do not invent pricing, offers, product details or availability.
+PRODUCT:
+Website development services.
+
+The business helps customers develop professional websites.
+No additional product features, prices, packages, discounts,
+delivery timelines or guarantees have been configured.
+
+PRIMARY OBJECTIVE:
+Book a demo with an interested prospect.
+
+CALL FLOW:
+1. Introduce yourself as an AI assistant.
+2. Ask whether it is a convenient time to talk.
+3. Briefly explain website development services.
+4. Ask whether the business already has a website.
+5. Understand what kind of website the customer needs.
+6. Ask whether they would like to see a demo.
+7. If interested, ask for their preferred date and time.
+8. Explain that a team member can follow up to confirm the demo.
+9. Never claim that a demo is booked unless an actual booking
+   system confirms it.
+
+PRICING:
+If asked about price, explain that pricing has not been configured
+and offer a human follow-up.
+
+CONVERSATION RULES:
+- Keep responses short and natural for phone calls.
+- Prefer one or two short sentences.
+- Ask only one question at a time.
+- Listen to the customer's actual response.
+- Do not repeat the entire pitch on every turn.
+- Do not pressure the customer.
+- Do not invent company details, features, offers or results.
 - If you do not know an answer, offer a human follow-up.
+- If the customer is busy, politely ask for a suitable time.
+- If the customer is not interested, politely end the conversation.
+- Never ask for OTPs, passwords, payment card details or other
+  sensitive information.
 - Respect requests to stop calling immediately.
-- Never request OTPs, passwords, card details or sensitive information.
-- If the customer is busy, politely ask whether another time is suitable.
 
-LEAD:
-Name: ${firstName} ${lastName}
-Company: ${company}
+OPENING:
+Start with:
+"Hello, main LeadFlow ki AI assistant hoon.
+Hum businesses ke liye professional websites develop karte hain.
+Kya abhi do minute baat karna convenient hoga?"
 
 GOAL:
-Understand the customer's interest and offer a human follow-up.
+Understand the customer's website requirements and offer a demo.
+Your goal is to generate an interested prospect and arrange
+a human follow-up, not to force a sale.
 `.trim();
 }
 
-async function callSarvamChat(messages) {
+/**
+ * Gemini is the conversation intelligence.
+ * Sarvam remains responsible for STT and TTS.
+ */
+async function callGeminiChat(messages) {
+  if (!env.GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY is missing.');
+  }
+
+  const systemMessage = messages.find(
+    (message) => message.role === 'system',
+  );
+
+  const contents = messages
+    .filter((message) => message.role !== 'system')
+    .map((message) => ({
+      role: message.role === 'assistant' ? 'model' : 'user',
+      parts: [
+        {
+          text: String(message.content || ''),
+        },
+      ],
+    }));
+
+  if (!contents.length) {
+    throw new Error('Gemini conversation is empty.');
+  }
+
+  const model = env.GEMINI_MODEL || 'gemini-3.6-flash';
+
   const response = await fetch(
-    `${SARVAM_BASE_URL}/v2/chat/completions`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
     {
       method: 'POST',
       headers: {
-        'api-subscription-key': env.SARVAM_API_KEY,
         'Content-Type': 'application/json',
+        'x-goog-api-key': env.GEMINI_API_KEY,
       },
       body: JSON.stringify({
-        model: env.SARVAM_LLM_MODEL || 'deepseekv4.1-flash-1017',
-        messages,
-        reasoning_effort: 'none',
-        temperature: 0.4,
-        max_tokens: MAX_LLM_TOKENS,
+        systemInstruction: {
+          parts: [
+            {
+              text: systemMessage?.content || '',
+            },
+          ],
+        },
+        contents,
+        generationConfig: {
+          temperature: 0.4,
+          maxOutputTokens:
+            env.GEMINI_MAX_OUTPUT_TOKENS || MAX_LLM_TOKENS,
+        },
       }),
-      signal: AbortSignal.timeout(20000),
+      signal: AbortSignal.timeout(15000),
     },
   );
 
@@ -188,22 +265,33 @@ async function callSarvamChat(messages) {
     const errorText = await response.text();
 
     console.error(
-      'Sarvam LLM error:',
+      'Gemini API error:',
       response.status,
-      errorText.slice(0, 500),
+      errorText.slice(0, 400),
     );
 
-    throw new Error('AI response generation failed.');
+    throw new Error(
+      `Gemini response generation failed (${response.status}).`,
+    );
   }
 
   const data = await response.json();
-  const answer = data.choices?.[0]?.message?.content;
 
-  if (!answer || typeof answer !== 'string') {
-    throw new Error('Sarvam returned an empty response.');
+  const answer = data.candidates?.[0]?.content?.parts
+    ?.map((part) => part.text || '')
+    .join('')
+    .trim();
+
+  if (!answer) {
+    console.error(
+      'Gemini returned no text:',
+      JSON.stringify(data).slice(0, 500),
+    );
+
+    throw new Error('Gemini returned an empty response.');
   }
 
-  return answer.trim();
+  return answer;
 }
 
 async function generateSpeech(text, languageCode) {
@@ -393,8 +481,15 @@ export async function handleExotelVoiceSocket(
   exotelSocket,
   tokenPayload,
 ) {
-  if (!env.SARVAM_API_KEY) {
-    console.error('SARVAM_API_KEY is missing.');
+  // STT/TTS and Gemini are all required for a complete AI call.
+  if (!env.SARVAM_API_KEY || !env.GEMINI_API_KEY) {
+    console.error(
+      'Voice AI configuration missing:',
+      {
+        sarvamConfigured: Boolean(env.SARVAM_API_KEY),
+        geminiConfigured: Boolean(env.GEMINI_API_KEY),
+      },
+    );
 
     exotelSocket.close(
       1011,
@@ -696,7 +791,7 @@ export async function handleExotelVoiceSocket(
       content: cleanText,
     });
 
-    // Keep only a small conversation context.
+    // Keep a small conversation context.
     while (
       conversation.length >
       MAX_CONVERSATION_MESSAGES
@@ -709,7 +804,8 @@ export async function handleExotelVoiceSocket(
     );
 
     try {
-      const answer = await callSarvamChat(
+      // Gemini generates the next conversational response.
+      const answer = await callGeminiChat(
         conversation,
       );
 
@@ -732,6 +828,7 @@ export async function handleExotelVoiceSocket(
         cleanText,
       );
 
+      // Sarvam converts Gemini's response into speech.
       await speak(
         answer,
         languageCode,
@@ -826,13 +923,15 @@ export async function handleExotelVoiceSocket(
           greeted = true;
 
           const greeting =
-            `Hello, I'm an AI assistant calling on behalf of ${lead.organization_name}. Is this a convenient time to speak?`;
+            `Hello, main ${lead.organization_name || 'LeadFlow'} ki AI assistant hoon. ` +
+            `Hum businesses ke liye professional websites develop karte hain. ` +
+            `Kya abhi do minute baat karna convenient hoga?`;
 
           transcript.push(`AI: ${greeting}`);
 
           speak(
             greeting,
-            'en-IN',
+            'hi-IN',
             turnNumber,
           ).catch((error) => {
             console.error(
@@ -928,7 +1027,7 @@ export async function handleExotelVoiceSocket(
         sarvamSessionReady = true;
 
         console.log(
-          'Sarvam realtime session ready.',
+          'Sarvam realtime STT session ready.',
         );
 
         while (

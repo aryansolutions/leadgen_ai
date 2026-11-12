@@ -4,17 +4,30 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 
-const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
+const currentDirectory = path.dirname(
+  fileURLToPath(import.meta.url),
+);
 
 dotenv.config({
   path: path.resolve(currentDirectory, '../../../.env'),
 });
 
 const environmentSchema = z.object({
-  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  NODE_ENV: z.enum([
+    'development',
+    'test',
+    'production',
+  ]).default('development'),
+
   PORT: z.coerce.number().default(4000),
-  CLIENT_ORIGIN: z.string().default('http://localhost:5173'),
-  PUBLIC_API_URL: z.string().url().optional().default('http://localhost:4000'),
+
+  CLIENT_ORIGIN: z.string().default(
+    'http://localhost:5173',
+  ),
+
+  PUBLIC_API_URL: z.string().url().optional().default(
+    'http://localhost:4000',
+  ),
 
   DATABASE_URL: z.string().min(1),
   DATABASE_SSL: z.string().default('false'),
@@ -28,7 +41,11 @@ const environmentSchema = z.object({
   // Gemini AI intelligence
   GEMINI_API_KEY: z.string().optional().default(''),
   GEMINI_MODEL: z.string().default('gemini-3.6-flash'),
-  GEMINI_MAX_OUTPUT_TOKENS: z.coerce.number().int().min(16).max(256).default(60),
+  GEMINI_MAX_OUTPUT_TOKENS: z.coerce.number()
+    .int()
+    .min(16)
+    .max(256)
+    .default(60),
 
   // Existing OpenAI configuration retained
   OPENAI_API_KEY: z.string().optional().default(''),
@@ -60,16 +77,19 @@ if (!parsed.success) {
     'Invalid environment configuration:',
     parsed.error.flatten().fieldErrors,
   );
+
   process.exit(1);
 }
 
 export const env = {
   ...parsed.data,
 
-  DATABASE_SSL: parsed.data.DATABASE_SSL === 'true',
+  DATABASE_SSL:
+    parsed.data.DATABASE_SSL === 'true',
 
   DATABASE_SSL_REJECT_UNAUTHORIZED:
     parsed.data.DATABASE_SSL_REJECT_UNAUTHORIZED === 'true',
 
-  CALLING_ENABLED: parsed.data.CALLING_ENABLED === 'true',
+  CALLING_ENABLED:
+    parsed.data.CALLING_ENABLED === 'true',
 };
