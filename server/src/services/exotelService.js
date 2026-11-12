@@ -3,7 +3,7 @@ import { env } from '../config/env.js';
 import { HttpError } from '../utils/httpError.js';
 
 function extractCallSid(responseText) {
-  // Exotel JSON response
+  // Exotel JSON response.
   try {
     const parsed = JSON.parse(responseText);
 
@@ -14,8 +14,10 @@ function extractCallSid(responseText) {
     // Try XML parsing below.
   }
 
-  // Exotel XML response
-  const xmlMatch = responseText.match(/<Sid>\s*([^<]+)\s*<\/Sid>/i);
+  // Exotel XML response.
+  const xmlMatch = responseText.match(
+    /<Sid>\s*([^<]+)\s*<\/Sid>/i,
+  );
 
   return xmlMatch?.[1]?.trim() || null;
 }
@@ -37,7 +39,10 @@ export async function startAiCall({
     !env.EXOTEL_API_KEY ||
     !env.EXOTEL_API_TOKEN
   ) {
-    throw new HttpError(503, 'Exotel credentials are incomplete.');
+    throw new HttpError(
+      503,
+      'Exotel credentials are incomplete.',
+    );
   }
 
   const approvedCallerId = env.EXOTEL_CALLER_ID;
@@ -50,7 +55,10 @@ export async function startAiCall({
   }
 
   if (!customerPhone || !streamUrl || !statusCallback) {
-    throw new HttpError(400, 'Required call parameters are missing.');
+    throw new HttpError(
+      400,
+      'Required call parameters are missing.',
+    );
   }
 
   const endpoint = new URL(
@@ -60,7 +68,6 @@ export async function startAiCall({
     `https://${env.EXOTEL_SUBDOMAIN}`,
   );
 
-  // Exotel multipart form request
   const form = new FormData();
 
   form.append('From', customerPhone);
@@ -88,7 +95,10 @@ export async function startAiCall({
       signal: AbortSignal.timeout(15_000),
     });
   } catch (error) {
-    console.error('Exotel connection error:', error.message);
+    console.error(
+      'Exotel connection error:',
+      error.message,
+    );
 
     throw new HttpError(
       502,

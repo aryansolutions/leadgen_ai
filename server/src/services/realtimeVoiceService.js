@@ -1,4 +1,3 @@
-
 import WebSocket from 'ws';
 import { tenantQuery } from '../config/database.js';
 import { env } from '../config/env.js';
@@ -115,7 +114,6 @@ function detectResponseLanguage(language, text) {
 
 /**
  * LeadFlow website-development sales agent.
- * Gemini receives this prompt as systemInstruction.
  */
 function createSystemPrompt(lead) {
   const organizationName = String(
@@ -205,8 +203,7 @@ a human follow-up, not to force a sale.
 }
 
 /**
- * Gemini is the conversation intelligence.
- * Sarvam remains responsible for STT and TTS.
+ * Gemini generates conversational responses.
  */
 async function callGeminiChat(messages) {
   if (!env.GEMINI_API_KEY) {
@@ -233,6 +230,8 @@ async function callGeminiChat(messages) {
   }
 
   const model = env.GEMINI_MODEL || 'gemini-3.6-flash';
+
+  console.log('GEMINI_REQUEST_STARTED');
 
   const response = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
@@ -291,10 +290,20 @@ async function callGeminiChat(messages) {
     throw new Error('Gemini returned an empty response.');
   }
 
+  console.log('GEMINI_RESPONSE_RECEIVED');
+
   return answer;
 }
 
+/**
+ * Sarvam text-to-speech.
+ */
 async function generateSpeech(text, languageCode) {
+  console.log('SARVAM_TTS_REQUEST_STARTED', {
+    languageCode,
+    textLength: String(text || '').length,
+  });
+
   const response = await fetch(
     `${SARVAM_BASE_URL}/text-to-speech`,
     {
@@ -334,11 +343,23 @@ async function generateSpeech(text, languageCode) {
     throw new Error('Sarvam returned no audio.');
   }
 
-  return extractWavPcm(
+  const pcm = extractWavPcm(
     Buffer.from(audioBase64, 'base64'),
   );
+
+  console.log('SARVAM_TTS_COMPLETED', {
+    pcmBytes: pcm.length,
+    durationSeconds: Number(
+      (pcm.length / (EXOTEL_SAMPLE_RATE * 2)).toFixed(2),
+    ),
+  });
+
+  return pcm;
 }
 
+/**
+ * Sends PCM audio to Exotel in 200ms chunks.
+ */
 function sendExotelAudio(
   exotelSocket,
   streamSid,
@@ -388,7 +409,7 @@ function sendExotelAudio(
         return;
       }
 
-      // 3200 bytes = approximately 200 ms of PCM16 mono at 8 kHz.
+      // 3200 bytes = approximately 200 ms PCM16 mono at 8 kHz.
       const chunk = pcmBuffer.subarray(
         offset,
         offset + 3200,
@@ -481,15 +502,11 @@ export async function handleExotelVoiceSocket(
   exotelSocket,
   tokenPayload,
 ) {
-  // STT/TTS and Gemini are all required for a complete AI call.
   if (!env.SARVAM_API_KEY || !env.GEMINI_API_KEY) {
-    console.error(
-      'Voice AI configuration missing:',
-      {
-        sarvamConfigured: Boolean(env.SARVAM_API_KEY),
-        geminiConfigured: Boolean(env.GEMINI_API_KEY),
-      },
-    );
+    console.error('Voice AI configuration missing:', {
+      sarvamConfigured: Boolean(env.SARVAM_API_KEY),
+      geminiConfigured: Boolean(env.GEMINI_API_KEY),
+    });
 
     exotelSocket.close(
       1011,
@@ -592,6 +609,9 @@ export async function handleExotelVoiceSocket(
   let currentPlayback = 0;
 
   let pendingSarvamAudio = [];
+  let incomingAudioChunks = 0;
+  let sarvamPartialCount = 0;
+  let finalTranscriptCount = 0;
 
   const transcript = [];
 
@@ -693,6 +713,21 @@ export async function handleExotelVoiceSocket(
       return;
     }
 
+    if (
+      !streamSid ||
+      exotelSocket.readyState !== WebSocket.OPEN
+    ) {
+      throw new Error(
+        'Exotel media stream is not ready for playback.',
+      );
+    }
+
+    console.log('EXOTEL_AUDIO_PLAYBACK_STARTED', {
+      pcmBytes: pcm.length,
+      playbackId,
+      turnNumber: expectedTurn,
+    });
+
     await sendExotelAudio(
       exotelSocket,
       streamSid,
@@ -702,6 +737,11 @@ export async function handleExotelVoiceSocket(
         expectedTurn === turnNumber &&
         playbackId === currentPlayback,
     );
+
+    console.log('EXOTEL_AUDIO_PLAYBACK_FINISHED', {
+      playbackId,
+      turnNumber: expectedTurn,
+    });
   }
 
   async function respondToCustomer(
@@ -783,7 +823,6 @@ export async function handleExotelVoiceSocket(
 
     const thisTurn = ++turnNumber;
 
-    // Invalidate any previous audio playback.
     currentPlayback += 1;
 
     conversation.push({
@@ -791,7 +830,6 @@ export async function handleExotelVoiceSocket(
       content: cleanText,
     });
 
-    // Keep a small conversation context.
     while (
       conversation.length >
       MAX_CONVERSATION_MESSAGES
@@ -803,8 +841,13 @@ export async function handleExotelVoiceSocket(
       `Customer: ${cleanText}`,
     );
 
+    console.log('CUSTOMER_TURN_RECEIVED', {
+      turnNumber: thisTurn,
+      text: cleanText,
+      detectedLanguage,
+    });
+
     try {
-      // Gemini generates the next conversational response.
       const answer = await callGeminiChat(
         conversation,
       );
@@ -815,6 +858,11 @@ export async function handleExotelVoiceSocket(
       ) {
         return;
       }
+
+      console.log('GEMINI_ANSWER_READY', {
+        turnNumber: thisTurn,
+        answer,
+      });
 
       conversation.push({
         role: 'assistant',
@@ -828,7 +876,6 @@ export async function handleExotelVoiceSocket(
         cleanText,
       );
 
-      // Sarvam converts Gemini's response into speech.
       await speak(
         answer,
         languageCode,
@@ -836,8 +883,8 @@ export async function handleExotelVoiceSocket(
       );
     } catch (error) {
       console.error(
-        'Customer response pipeline failed:',
-        error.message,
+        'CUSTOMER_RESPONSE_PIPELINE_FAILED:',
+        error.stack || error.message,
       );
     }
   }
@@ -948,10 +995,20 @@ export async function handleExotelVoiceSocket(
         event.event === 'media' &&
         event.media?.payload
       ) {
-        sendAudioToSarvam(
-          event.media.payload,
-        );
+        incomingAudioChunks++;
 
+        if (
+          incomingAudioChunks === 1 ||
+          incomingAudioChunks % 50 === 0
+        ) {
+          console.log('EXOTEL_AUDIO_RECEIVED', {
+            chunks: incomingAudioChunks,
+            payloadLength: event.media.payload.length,
+            sarvamReady: sarvamSessionReady,
+          });
+        }
+
+        sendAudioToSarvam(event.media.payload);
         return;
       }
 
@@ -1049,8 +1106,42 @@ export async function handleExotelVoiceSocket(
         return;
       }
 
+      if (event.event === 'transcript.partial') {
+        sarvamPartialCount++;
+
+        if (
+          sarvamPartialCount === 1 ||
+          sarvamPartialCount % 5 === 0
+        ) {
+          console.log('SARVAM_TRANSCRIPT_PARTIAL', {
+            count: sarvamPartialCount,
+            text: event.text || '',
+          });
+        }
+
+        return;
+      }
+
       if (event.event === 'transcript.final') {
-        const spokenText = event.text || '';
+        finalTranscriptCount++;
+
+        const spokenText = String(
+          event.text || '',
+        ).trim();
+
+        console.log('SARVAM_TRANSCRIPT_FINAL', {
+          count: finalTranscriptCount,
+          text: spokenText,
+          language:
+            event.language ||
+            event.language_code ||
+            'auto',
+        });
+
+        if (!spokenText) {
+          console.warn('SARVAM_FINAL_TRANSCRIPT_EMPTY');
+          return;
+        }
 
         respondToCustomer(
           spokenText,
@@ -1059,8 +1150,8 @@ export async function handleExotelVoiceSocket(
           'auto',
         ).catch((error) => {
           console.error(
-            'Turn processing failed:',
-            error.message,
+            'TURN_PROCESSING_FAILED:',
+            error.stack || error.message,
           );
         });
 
@@ -1068,21 +1159,10 @@ export async function handleExotelVoiceSocket(
       }
 
       if (event.event === 'vad.speech_start') {
-        // Invalidate current TTS playback.
-        turnNumber += 1;
-        currentPlayback += 1;
+        console.log('SARVAM_VAD_SPEECH_START');
 
-        if (
-          streamSid &&
-          exotelSocket.readyState === WebSocket.OPEN
-        ) {
-          exotelSocket.send(
-            JSON.stringify({
-              event: 'clear',
-              stream_sid: streamSid,
-            }),
-          );
-        }
+        // Do not invalidate an in-progress Gemini response here.
+        // The final transcript will trigger the next customer turn.
 
         return;
       }
@@ -1100,6 +1180,12 @@ export async function handleExotelVoiceSocket(
             'Speech recognition failed',
           );
         }
+
+        return;
+      }
+
+      if (event.event) {
+        console.log('SARVAM_EVENT', event.event);
       }
     } catch (error) {
       console.error(

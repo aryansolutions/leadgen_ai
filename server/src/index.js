@@ -31,14 +31,40 @@ server.on('upgrade', (request, socket, head) => {
 
     const requestUrl = new URL(request.url, `http://${host}`);
 
-    if (requestUrl.pathname !== '/media') {
+    // Accept the token from either the URL path or query string.
+    const pathMatch = requestUrl.pathname.match(
+      /^\/media\/([^/]+)\/?$/,
+    );
+
+    if (
+      requestUrl.pathname !== '/media' &&
+      !pathMatch
+    ) {
       socket.destroy();
       return;
     }
 
-    const token = requestUrl.searchParams.get('token');
+    let token = requestUrl.searchParams.get('token');
+
+    if (!token && pathMatch) {
+      token = decodeURIComponent(pathMatch[1]);
+    }
 
     if (!token) {
+      console.error('Rejected media WebSocket upgrade:', {
+        reason: 'Missing JWT token',
+        pathname: requestUrl.pathname,
+        queryKeys: [...requestUrl.searchParams.keys()],
+      });
+
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    if (!env.JWT_SECRET) {
+      console.error('JWT_SECRET is missing.');
+
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
       return;
@@ -50,23 +76,42 @@ server.on('upgrade', (request, socket, head) => {
       algorithms: ['HS256'],
     });
 
+    const callIdValid = UUID_PATTERN.test(payload.callId || '');
+    const organizationIdValid = UUID_PATTERN.test(
+      payload.organizationId || '',
+    );
+    const userIdValid = UUID_PATTERN.test(payload.userId || '');
+
     if (
       payload.purpose !== 'exotel-media' ||
-      !UUID_PATTERN.test(payload.callId || '') ||
-      !UUID_PATTERN.test(payload.organizationId || '') ||
-      !UUID_PATTERN.test(payload.userId || '')
+      !callIdValid ||
+      !organizationIdValid ||
+      !userIdValid
     ) {
+      console.error('Rejected media WebSocket upgrade:', {
+        reason: 'Invalid JWT claims',
+        purposeValid: payload.purpose === 'exotel-media',
+        callIdValid,
+        organizationIdValid,
+        userIdValid,
+      });
+
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
       return;
     }
+
     console.log('Media WebSocket authentication successful.');
 
     mediaServer.handleUpgrade(request, socket, head, (websocket) => {
       mediaServer.emit('connection', websocket, payload);
     });
   } catch (error) {
-    console.error('Rejected media WebSocket upgrade:', error.message);
+    console.error('Rejected media WebSocket upgrade:', {
+      errorName: error.name,
+      errorMessage: error.message,
+      jwtSecretConfigured: Boolean(env.JWT_SECRET),
+    });
 
     if (!socket.destroyed) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
@@ -76,7 +121,6 @@ server.on('upgrade', (request, socket, head) => {
 });
 
 mediaServer.on('connection', (websocket, tokenPayload) => {
-
   console.log('Exotel media WebSocket connected:', {
     callId: tokenPayload.callId,
     organizationId: tokenPayload.organizationId,

@@ -2,6 +2,7 @@
 import { Router } from 'express';
 import jwt from 'jsonwebtoken';
 import rateLimit from 'express-rate-limit';
+
 import { tenantQuery } from '../config/database.js';
 import { env } from '../config/env.js';
 import { startAiCall } from '../services/exotelService.js';
@@ -79,6 +80,10 @@ router.post(
         );
       }
 
+      if (!env.JWT_SECRET) {
+        throw new HttpError(503, 'JWT_SECRET is not configured.');
+      }
+
       const leadResult = await tenantQuery(
         request.user.organization_id,
         request.user.user_id,
@@ -135,7 +140,7 @@ router.post(
         );
       }
 
-      // Create the internal call record.
+      // Create internal call record.
       const callResult = await tenantQuery(
         request.user.organization_id,
         request.user.user_id,
@@ -159,7 +164,7 @@ router.post(
 
       const callId = callResult.rows[0].id;
 
-      // Create a short-lived token for the media WebSocket.
+      // Generate short-lived media authentication token.
       const streamToken = jwt.sign(
         {
           purpose: 'exotel-media',
@@ -175,11 +180,27 @@ router.post(
         },
       );
 
-      const streamUrlUrl = new URL('/media', env.PUBLIC_API_URL);
-      streamUrlUrl.protocol = 'wss:';
-      streamUrlUrl.searchParams.set('token', streamToken);
-      streamUrlUrl.searchParams.set('sample-rate', '8000');
+      // Put the token in the URL path instead of the query string.
+      const streamUrlObject = new URL(
+        `/media/${encodeURIComponent(streamToken)}`,
+        env.PUBLIC_API_URL,
+      );
 
+      streamUrlObject.protocol = 'wss:';
+
+      streamUrlObject.searchParams.set('sample-rate', '8000');
+
+      const streamUrl = streamUrlObject.toString();
+
+      // Keep within the provider's documented URL length limit.
+      if (streamUrl.length >= 600) {
+        throw new HttpError(
+          400,
+          'The media streaming URL exceeds the provider URL length limit.',
+        );
+      }
+
+      // Build Exotel status callback.
       const webhookUrl = new URL(
         `/api/webhooks/exotel/${request.user.organization_id}/${callId}`,
         env.PUBLIC_API_URL,
@@ -190,13 +211,12 @@ router.post(
         env.EXOTEL_WEBHOOK_SECRET,
       );
 
-      // Initiate the provider call.
       let providerResult;
 
       try {
         providerResult = await startAiCall({
           customerPhone: lead.phone,
-          streamUrl: streamUrlUrl.toString(),
+          streamUrl,
           statusCallback: webhookUrl.toString(),
         });
       } catch (error) {
@@ -217,8 +237,7 @@ router.post(
         throw error;
       }
 
-      // The provider has accepted the call. Do not mark it failed
-      // or invite a retry if this subsequent database update fails.
+      // Save provider ID without undoing an accepted call.
       try {
         await tenantQuery(
           request.user.organization_id,
@@ -243,7 +262,10 @@ router.post(
       } catch (error) {
         console.error(
           'Provider accepted call, but saving its ID failed:',
-          { callId, error: error.message },
+          {
+            callId,
+            error: error.message,
+          },
         );
       }
 
