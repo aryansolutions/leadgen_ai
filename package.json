@@ -1,0 +1,29 @@
+{
+  "name": "leadflow-rds",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Multi-tenant lead generation and AI calling CRM",
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev --workspace server\" \"npm run dev --workspace client\"",
+    "build": "npm run build --workspace client",
+    "start": "npm run start --workspace server",
+    "lint": "npm run lint --workspaces --if-present",
+    "format": "prettier --write .",
+    "db:migrate": "npm run db:migrate --workspace server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "prettier": "^3.5.3",
+    "eslint": "^9.20.1",
+    "@eslint/js": "^9.20.0",
+    "globals": "^15.14.0",
+    "eslint-plugin-react-hooks": "^5.1.0"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true
+  }
+}
