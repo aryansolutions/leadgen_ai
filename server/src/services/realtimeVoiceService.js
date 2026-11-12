@@ -205,95 +205,194 @@ a human follow-up, not to force a sale.
 /**
  * Gemini generates conversational responses.
  */
+
+
+
 async function callGeminiChat(messages) {
   if (!env.GEMINI_API_KEY) {
     throw new Error('GEMINI_API_KEY is missing.');
   }
 
   const systemMessage = messages.find(
-    (message) => message.role === 'system',
+    (message) => message.role === 'system'
   );
 
   const contents = messages
     .filter((message) => message.role !== 'system')
     .map((message) => ({
       role: message.role === 'assistant' ? 'model' : 'user',
-      parts: [
-        {
-          text: String(message.content || ''),
-        },
-      ],
-    }));
+      parts: [{ text: String(message.content || '') }],
+    }))
+    .filter((message) =>
+      message.parts[0].text.trim()
+    );
 
   if (!contents.length) {
     throw new Error('Gemini conversation is empty.');
   }
 
-  const model = env.GEMINI_MODEL || 'gemini-3.6-flash';
+  const model = env.GEMINI_MODEL || 'gemini-3.8-flash';
 
-  console.log('GEMINI_REQUEST_STARTED');
+  const retryableStatuses = [
+    408, 429, 500, 502, 503, 504,
+  ];
 
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': env.GEMINI_API_KEY,
-      },
-      body: JSON.stringify({
-        systemInstruction: {
-          parts: [
-            {
-              text: systemMessage?.content || '',
+  const delays = [1200, 2500];
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const controller = new AbortController();
+
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, 20000);
+
+    const startedAt = Date.now();
+
+    let retry = false;
+    let lastError;
+
+    try {
+      console.log('GEMINI_REQUEST_STARTED', {
+        model,
+        attempt: attempt + 1,
+        maxAttempts: 3,
+      });
+
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': env.GEMINI_API_KEY,
+          },
+          body: JSON.stringify({
+            ...(systemMessage?.content
+              ? {
+                systemInstruction: {
+                  parts: [
+                    { text: systemMessage.content },
+                  ],
+                },
+              }
+              : {}),
+            contents,
+            generationConfig: {
+              maxOutputTokens: 120,
+              temperature: 0.7,
             },
-          ],
-        },
-        contents,
-        generationConfig: {
-          temperature: 0.4,
-          maxOutputTokens:
-            env.GEMINI_MAX_OUTPUT_TOKENS || MAX_LLM_TOKENS,
-        },
-      }),
-      signal: AbortSignal.timeout(15000),
-    },
+          }),
+          signal: controller.signal,
+        }
+      );
+
+      const responseText = await response.text();
+
+      if (!response.ok) {
+        console.error('GEMINI_API_ERROR', {
+          status: response.status,
+          attempt: attempt + 1,
+          durationMs: Date.now() - startedAt,
+          response: responseText.slice(0, 500),
+        });
+
+        const error = new Error(
+          `Gemini API failed: HTTP ${response.status}`
+        );
+
+        if (
+          retryableStatuses.includes(response.status) &&
+          attempt < 2
+        ) {
+          retry = true;
+          lastError = error;
+        } else {
+          throw error;
+        }
+      } else {
+        let data;
+
+        try {
+          data = JSON.parse(responseText);
+        } catch {
+          throw new Error(
+            'Gemini returned invalid JSON.'
+          );
+        }
+
+        const answer = data.candidates?.[0]?.content?.parts
+          ?.map((part) => part.text || '')
+          .join('')
+          .trim();
+
+        if (!answer) {
+          const reason =
+            data.candidates?.[0]?.finishReason ||
+            'Unknown';
+
+          throw new Error(
+            `Gemini returned no answer. Finish reason: ${reason}`
+          );
+        }
+
+        console.log('GEMINI_RESPONSE_RECEIVED', {
+          attempt: attempt + 1,
+          durationMs: Date.now() - startedAt,
+        });
+
+        return answer;
+      }
+
+    } catch (error) {
+      lastError = error;
+
+      console.error('GEMINI_REQUEST_FAILED', {
+        attempt: attempt + 1,
+        message: error.message,
+        timedOut: controller.signal.aborted,
+      });
+
+      const isRetryable =
+        controller.signal.aborted ||
+        error.name === 'TypeError' ||
+        retryableStatuses.some((status) =>
+          error.message.includes(`HTTP ${status}`)
+        );
+
+      if (isRetryable && attempt < 2) {
+        retry = true;
+      } else {
+        throw error;
+      }
+
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (retry && attempt < 2) {
+      const baseDelay = delays[attempt];
+      const jitter = Math.floor(Math.random() * 500);
+      const waitTime = baseDelay + jitter;
+
+      console.log('GEMINI_RETRY_SCHEDULED', {
+        nextAttempt: attempt + 2,
+        waitTimeMs: waitTime,
+        reason: lastError?.message,
+      });
+
+      await new Promise((resolve) =>
+        setTimeout(resolve, waitTime)
+      );
+    }
+  }
+
+  throw new Error(
+    'Gemini failed after 3 attempts.'
   );
-
-  if (!response.ok) {
-    const errorText = await response.text();
-
-    console.error(
-      'Gemini API error:',
-      response.status,
-      errorText.slice(0, 400),
-    );
-
-    throw new Error(
-      `Gemini response generation failed (${response.status}).`,
-    );
-  }
-
-  const data = await response.json();
-
-  const answer = data.candidates?.[0]?.content?.parts
-    ?.map((part) => part.text || '')
-    .join('')
-    .trim();
-
-  if (!answer) {
-    console.error(
-      'Gemini returned no text:',
-      JSON.stringify(data).slice(0, 500),
-    );
-
-    throw new Error('Gemini returned an empty response.');
-  }
-
-  console.log('GEMINI_RESPONSE_RECEIVED');
-
-  return answer;
 }
+
+
+
 
 /**
  * Sarvam text-to-speech.
@@ -754,15 +853,16 @@ export async function handleExotelVoiceSocket(
 
     if (!cleanText || closed) return;
 
+    // Handle customer opt-out before calling Gemini.
     if (isOptOutRequest(cleanText)) {
       const thisTurn = ++turnNumber;
 
+      // Stop any ongoing playback.
       currentPlayback += 1;
 
-      transcript.push(
-        `Customer: ${cleanText}`,
-      );
+      transcript.push(`Customer: ${cleanText}`);
 
+      // Record opt-out in the database.
       try {
         await markLeadAsOptedOut(
           lead.lead_id,
@@ -771,9 +871,10 @@ export async function handleExotelVoiceSocket(
       } catch (error) {
         console.error(
           'Could not record opt-out:',
-          error.message,
+          error.stack || error.message,
         );
 
+        // Do not continue as if opt-out was successfully recorded.
         return;
       }
 
@@ -793,36 +894,52 @@ export async function handleExotelVoiceSocket(
 
       transcript.push(`AI: ${goodbye}`);
 
-      await saveTranscript();
-
+      // Save transcript without blocking the goodbye.
       try {
-        await speak(
-          goodbye,
-          language,
-          thisTurn,
-        );
+        await saveTranscript();
       } catch (error) {
         console.error(
-          'Opt-out goodbye failed:',
+          'OPT_OUT_TRANSCRIPT_SAVE_FAILED:',
           error.message,
         );
       }
 
-      if (
-        !closed &&
-        exotelSocket.readyState === WebSocket.OPEN
-      ) {
-        exotelSocket.close(
-          1000,
-          'Customer opted out',
+      // Speak the opt-out confirmation.
+      try {
+        if (!closed && thisTurn === turnNumber) {
+          await speak(
+            goodbye,
+            language,
+            thisTurn,
+          );
+        }
+      } catch (error) {
+        console.error(
+          'OPT_OUT_GOODBYE_FAILED:',
+          error.stack || error.message,
         );
+      } finally {
+        // Close the call even if speech generation or playback fails.
+        if (
+          !closed &&
+          thisTurn === turnNumber &&
+          exotelSocket.readyState === WebSocket.OPEN
+        ) {
+          exotelSocket.close(
+            1000,
+            'Customer opted out',
+          );
+        }
       }
 
       return;
     }
 
+  // Keep your existing normal Gemini response pipeline below this point.
+
     const thisTurn = ++turnNumber;
 
+    // Stop any previous playback.
     currentPlayback += 1;
 
     conversation.push({
@@ -830,16 +947,16 @@ export async function handleExotelVoiceSocket(
       content: cleanText,
     });
 
+    // Keep conversation history within the configured limit.
     while (
       conversation.length >
       MAX_CONVERSATION_MESSAGES
     ) {
+      // Preserve the system message at index 0.
       conversation.splice(1, 2);
     }
 
-    transcript.push(
-      `Customer: ${cleanText}`,
-    );
+    transcript.push(`Customer: ${cleanText}`);
 
     console.log('CUSTOMER_TURN_RECEIVED', {
       turnNumber: thisTurn,
@@ -852,6 +969,7 @@ export async function handleExotelVoiceSocket(
         conversation,
       );
 
+      // Ignore responses belonging to an old turn.
       if (
         closed ||
         thisTurn !== turnNumber
@@ -859,33 +977,76 @@ export async function handleExotelVoiceSocket(
         return;
       }
 
+      if (
+        typeof answer !== 'string' ||
+        !answer.trim()
+      ) {
+        throw new Error(
+          'Gemini returned an empty response.',
+        );
+      }
+
+      const cleanAnswer = answer.trim();
+
       console.log('GEMINI_ANSWER_READY', {
         turnNumber: thisTurn,
-        answer,
+        answer: cleanAnswer,
       });
 
       conversation.push({
         role: 'assistant',
-        content: answer,
+        content: cleanAnswer,
       });
 
-      transcript.push(`AI: ${answer}`);
+      transcript.push(`AI: ${cleanAnswer}`);
 
       const languageCode = detectResponseLanguage(
         detectedLanguage,
         cleanText,
       );
 
+      // Speak the actual Gemini response.
       await speak(
-        answer,
+        cleanAnswer,
         languageCode,
         thisTurn,
       );
+
     } catch (error) {
       console.error(
         'CUSTOMER_RESPONSE_PIPELINE_FAILED:',
         error.stack || error.message,
       );
+
+      // Do not speak a fallback for an old turn or ended call.
+      if (
+        closed ||
+        thisTurn !== turnNumber
+      ) {
+        return;
+      }
+
+      const fallback =
+        detectedLanguage === 'hi-IN'
+          ? 'माफ़ कीजिए, अभी थोड़ी तकनीकी दिक्कत आ रही है। कृपया अपनी बात एक बार फिर बताइए।'
+          : 'Sorry, I am facing a temporary technical issue. Could you please repeat that?';
+
+      transcript.push(`AI: ${fallback}`);
+
+      try {
+        await speak(
+          fallback,
+          detectedLanguage === 'hi-IN'
+            ? 'hi-IN'
+            : 'en-IN',
+          thisTurn,
+        );
+      } catch (fallbackError) {
+        console.error(
+          'VOICE_FALLBACK_FAILED:',
+          fallbackError.stack || fallbackError.message,
+        );
+      }
     }
   }
 
