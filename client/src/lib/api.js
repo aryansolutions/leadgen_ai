@@ -6,6 +6,7 @@ export async function apiRequest(path, options = {}) {
 
   const headers = {
     ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
+    'ngrok-skip-browser-warning': 'true',
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...(organization?.id ? { 'X-Organization-Id': organization.id } : {}),
     ...options.headers,
